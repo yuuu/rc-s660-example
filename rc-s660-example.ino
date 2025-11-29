@@ -1,17 +1,20 @@
 #include <Arduino.h>
+#include <M5StampC3LED.h>
 #include "NfcPort400.h"
 
 const int RX_PIN = 18; // RC-S660/S の TXD
 const int TX_PIN = 19; // RC-S660/S の RXD
 
+M5StampC3LED led = M5StampC3LED();
 NfcPort400 *nfc;
 
-// 前回検出したカードの IDm
-uint8_t lastIdm[8];
-bool lastIdmValid = false;
+// タイムアウト設定(ms)
+const uint32_t ACK_TIMEOUT = 200;    // ACK待ち時間を短縮
+const uint32_t RESP_TIMEOUT = 300;   // レスポンス待ち時間を短縮
 
-// 連続失敗回数
-int failureStreak = 0;
+// ポーリング開始時刻
+unsigned long pollingStartTime = 0;
+const unsigned long POLLING_TIMEOUT = 10000;  // 10秒でリブート
 
 void printHex(const uint8_t *data, size_t len) {
   for (size_t i = 0; i < len; i++) {
@@ -21,32 +24,6 @@ void printHex(const uint8_t *data, size_t len) {
   }
 }
 
-void reinitNfcPort400() {
-  Serial.println("Re-init NFC Port-400...");
-
-  // Transparent Session を一旦閉じてから再度開き直す
-  // 失敗しても続行（セッションが既に閉じているケースもあるので）
-  nfc->endTransparentSession();
-
-  delay(10);
-
-  if (!nfc->startTransparentSession()) {
-    Serial.println("  startTransparentSession failed.");
-    return;
-  }
-
-  if (!nfc->switchToFelica()) {
-    Serial.println("  switchToFelica failed.");
-    return;
-  }
-
-  if (!nfc->rfOn()) {
-    Serial.println("  rfOn failed.");
-    return;
-  }
-
-  Serial.println("  Re-init done.");
-}
 
 void setup() {
   Serial.begin(115200);
@@ -86,51 +63,43 @@ void setup() {
     return;
   }
 
+  led.show(0, 0, 0);
   Serial.println("Ready. Please touch a FeliCa card...");
+
+  // ポーリング開始時刻を記録
+  pollingStartTime = millis();
 }
 
 void loop() {
+  // ポーリング開始から10秒経過したらリブート
+  if (millis() - pollingStartTime >= POLLING_TIMEOUT) {
+    Serial.println("Polling timeout (10s). Rebooting ESP32...");
+    delay(100);  // シリアル出力完了を待つ
+    ESP.restart();  // ESP32をリブート
+  }
+
   uint8_t idm[8];
   uint8_t pmm[8];
 
-  bool ok = nfc->felicaPolling(0xFFFF, 0x00, 0x00, idm, pmm);
+  // タイムアウトを短縮してポーリング
+  bool ok = nfc->felicaPolling(0xFFFF, 0x00, 0x00, idm, pmm, ACK_TIMEOUT, RESP_TIMEOUT);
 
   if (ok) {
-    // ポーリング成功 → 失敗カウンタをリセット
-    failureStreak = 0;
+    led.show(0, 255, 0);
 
-    // すでに有効な IDm があり、今回と同じなら何も表示しない
-    bool isSameAsLast = lastIdmValid && (memcmp(idm, lastIdm, 8) == 0);
+    // カード検出時は毎回表示
+    Serial.print("FeliCa card detected! IDm: ");
+    printHex(idm, 8);
+    Serial.print("  PMm: ");
+    printHex(pmm, 8);
+    Serial.println();
 
-    if (!isSameAsLast) {
-      Serial.print("FeliCa card detected! IDm: ");
-      printHex(idm, 8);
-      Serial.print("  PMm: ");
-      printHex(pmm, 8);
-      Serial.println();
-
-      memcpy(lastIdm, idm, 8);
-      lastIdmValid = true;
-    }
-
-    delay(200);  // 読み取り間隔
+    Serial.println("Rebooting ESP32...");
+    delay(1000);  // シリアル出力完了を待つ
+    led.show(0, 0, 0);
+    ESP.restart();  // ESP32をリブート
   } else {
-    // 今回ポーリング失敗
-    failureStreak++;
-
-    // 直前までカードがいたなら「離脱」とみなす
-    if (lastIdmValid) {
-      Serial.println("FeliCa card removed.");
-      lastIdmValid = false;
-    }
-
-    // 一定回数連続で失敗したら、Port-400 を再初期化
-    if (failureStreak >= 5) {  // 約1秒分 (5回×200ms)
-      reinitNfcPort400();
-      failureStreak = 0;
-    }
-
-    delay(200);
+    delay(100);  // ポーリング間隔
   }
 }
 

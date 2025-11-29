@@ -71,6 +71,8 @@ bool NfcPort400::readHostPacket(uint8_t *pdBuf, uint16_t &pdLen, bool &isAck, ui
       if (millis() - start > timeoutMs) {
         return false;
       }
+      // WDT対策: 他タスクに譲る
+      delay(1);
     }
   }
 
